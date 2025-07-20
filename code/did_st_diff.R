@@ -162,3 +162,211 @@ print(didm.results)
 
 
 
+df.pm <- df.use
+# we need to convert the unit and time indicator to integer
+df.pm[,"bfs"] <- as.integer(as.factor(df.pm[,"bfs"]))
+df.pm[,"year"] <- as.integer(as.factor(df.pm[,"year"]))
+df.pm <- df.pm[,c("bfs","year","nat_rate_ord","indirect")]
+
+# Pre-processes and balances panel data
+df.pm <- PanelData(panel.data = df.pm,
+                   unit.id = "bfs",
+                   time.id = "year",
+                   treatment = "indirect",
+                   outcome = "nat_rate_ord")
+
+PM.results <- PanelMatch(lag=3, 
+                         refinement.method = "none", 
+                         panel.data = df.pm, 
+                         qoi = "att", 
+                         lead = c(0:3), 
+                         match.missing = TRUE)
+
+## For pre-treatment dynamic effects
+PM.results.placebo <- PanelMatch(lag=3, 
+                                 refinement.method = "none", 
+                                 panel.data = df.pm, 
+                                 qoi = "att", 
+                                 lead = c(0:3), 
+                                 match.missing = TRUE,
+                                 placebo.test = TRUE)
+
+# ATT
+PE.results.pool <- PanelEstimate(PM.results, panel.data = df.pm, pooled = TRUE)
+summary(PE.results.pool)
+
+
+# Dynamic Treatment Effects
+PE.results <- PanelEstimate(PM.results, panel.data = df.pm)
+PE.results.placebo <- placebo_test(PM.results.placebo, panel.data = df.pm, plot = F)
+
+# obtain lead and lag (placebo) estimates
+est_lead <- as.vector(PE.results$estimate)
+est_lag <- as.vector(PE.results.placebo$estimates)
+sd_lead <- apply(PE.results$bootstrapped.estimates,2,sd)
+sd_lag <- apply(PE.results.placebo$bootstrapped.estimates,2,sd)
+coef <- c(est_lag, 0, est_lead)
+sd <- c(sd_lag, 0, sd_lead)
+pm.output <- cbind.data.frame(ATT=coef, se=sd, t=c(-2:4)) %>% as.data.table()
+pm.output[, `:=`(
+  ci_lower = ATT - 1.96 * se,
+  ci_upper = ATT + 1.96 * se
+)]
+# plot
+ggplot(pm.output, aes(x = t, y = ATT)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.2) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray40") +
+  geom_hline(yintercept = 0, linetype = "solid", color = "gray60") +
+  labs(
+    x = "Event Time",
+    y = "ATT",
+    title = "Event Study Plot with 95% Confidence Intervals"
+  ) +
+  theme_minimal()
+
+
+
+
+
+out.fect <- fect(nat_rate_ord~indirect, data = df, 
+                 index = c("bfs","year"),
+                 method = 'fe', se = TRUE )
+print(out.fect$est.avg)
+plot(out.fect)
+
+
+################################################################################
+########################## Reversal Treatments #################################
+################################################################################
+
+library(fect)
+data(fect)
+data <- gs2020
+data$cycle <- as.integer(as.numeric(data$cycle/2))
+
+
+y <- "general_sharetotal_A_all"
+d <- "cand_A_all"
+unit <- "district_final"
+time <- "cycle"
+controls <- c("cand_H_all", "cand_B_all")
+index <- c("district_final", "cycle")
+
+panelview(Y=y, D=d, X=controls, index = index, data = data, 
+          xlab = "Time Period", ylab = "Unit", gridOff = TRUE, 
+          by.timing = TRUE, cex.legend=5, cex.axis= 5, 
+          cex.main = 10, cex.lab = 5)
+
+model.twfe <- feols(general_sharetotal_A_all ~ cand_A_all + 
+                      cand_H_all + cand_B_all | district_final + cycle,
+                    data=data, cluster = "district_final") 
+summary(model.twfe)
+
+
+
+data_cohort <- get.cohort(data, index = index, D=d,start0 = TRUE)
+# Generate a dummy variable treat
+data_cohort$treat <- 0
+data_cohort[which(data_cohort$Cohort!='Control'),'treat'] <- 1
+data_cohort[which(is.na(data_cohort$Time_to_Treatment)), "treat"] <- 0
+
+# remove observations that starts with treated status
+remove <- intersect(which(is.na(data_cohort$Time_to_Treatment)),
+                    which(data_cohort[,d]==1)) 
+if(length(remove)>0){data_cohort <- data_cohort[-remove,]}
+
+# replace missingness in Time_to_Treatment with an arbitrary number
+data_cohort[which(is.na(data_cohort$Time_to_Treatment)), "Time_to_Treatment"] <- 999 
+
+twfe.est <- feols(general_sharetotal_A_all ~ 
+                    i(Time_to_Treatment, treat, ref = -1) + 
+                    cand_H_all +cand_B_all | district_final + cycle,  
+                  data = data_cohort, cluster = "district_final")
+
+
+
+twfe.output <- as.data.frame(twfe.est$coeftable[c(1:25),])
+twfe.output$Time <- c(c(-16:-2),c(0:9)) + 1 
+
+# plot
+p.twfe <- esplot(twfe.output,Period = 'Time',Estimate = 'Estimate',
+                 SE = 'Std. Error', xlim = c(-15,1))
+p.twfe
+
+
+
+
+df.pm <- data_cohort
+# we need to convert the unit and time indicator to integer
+df.pm[,"district_final"] <- as.integer(as.factor(df.pm[,"district_final"]))
+df.pm[,"cycle"] <- as.integer(as.factor(df.pm[,"cycle"]))
+df.pm <- df.pm[,c("district_final","cycle","cand_A_all", 
+                  "general_sharetotal_A_all")]
+
+# Pre-processes and balances panel data
+df.pm <- PanelData(panel.data = df.pm,
+                   unit.id = "district_final",
+                   time.id = "cycle",
+                   treatment = "cand_A_all",
+                   outcome = "general_sharetotal_A_all")
+
+PM.results <- PanelMatch(lag=4, 
+                         refinement.method = "none", 
+                         panel.data = df.pm, 
+                         qoi = "att", 
+                         lead = 0, 
+                         match.missing = TRUE)
+
+## For pre-treatment dynamic effects
+PM.results.placebo <- PanelMatch(lag=4, 
+                                 refinement.method = "none", 
+                                 panel.data = df.pm, 
+                                 qoi = "att", 
+                                 lead = 0, 
+                                 match.missing = TRUE,
+                                 placebo.test = TRUE)
+
+PE.results.pool <- PanelEstimate(PM.results, panel.data = df.pm, pooled = TRUE)
+summary(PE.results.pool)
+#>      estimate  std.error       2.5%     97.5%
+#> [1,] 0.124243 0.02198589 0.08458918 0.1726429
+#> 
+#> 
+#> # Dynamic Treatment Effects
+PE.results <- PanelEstimate(PM.results, panel.data = df.pm)
+PE.results.placebo <- placebo_test(PM.results.placebo, panel.data = df.pm,
+                                   plot = FALSE)
+
+est_lead <- as.vector(PE.results$estimate)
+est_lag <- as.vector(PE.results.placebo$estimates)
+sd_lead <- apply(PE.results$bootstrapped.estimates,2,sd)
+sd_lag <- apply(PE.results.placebo$bootstrapped.estimates,2,sd)
+coef <- c(est_lag, 0, est_lead)
+sd <- c(sd_lag, 0, sd_lead)
+pm.output <- cbind.data.frame(ATT=coef, se=sd, t=c(-3:1))
+
+# plot
+p.pm <- esplot(data = pm.output,Period = 't',
+               Estimate = 'ATT',SE = 'se')
+p.pm
+
+
+
+didm.results <- did_multiplegt_dyn(
+  df = df.pm,
+  outcome = "general_sharetotal_A_all",
+  group = "district_final",
+  controls = NULL,
+  time = "cycle",
+  treatment = "cand_A_all",
+  effects = 2,
+  placebo = 3,
+  cluster = "district_final"
+)
+print(didm.results)
+
+
+
+
+
